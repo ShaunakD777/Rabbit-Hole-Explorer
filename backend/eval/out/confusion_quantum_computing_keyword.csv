@@ -1,0 +1,7 @@
+gold\predicted,prerequisite_of,subtopic_of,enables,related_to,breaks,no_relation
+prerequisite_of,0,0,0,0,0,4
+subtopic_of,0,0,0,0,0,2
+enables,0,0,0,0,0,2
+related_to,0,0,0,0,0,3
+breaks,0,0,0,0,0,1
+no_relation,0,0,0,0,0,2

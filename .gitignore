@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*_venv/
+env/
+dist/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environment / secrets -- real API keys live in backend/.env, never commit it.
+# Only the placeholder template (.env.example) is tracked.
+.env
+.env.*
+*.env
+*.env.local
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+service-account*.json
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Docker
+*.log
+
+# IDE / tooling
+.vscode/
+.idea/
+*.swp
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Data
+*.sqlite3
+postgres_data/
+redis_data/

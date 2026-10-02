@@ -1,0 +1,21 @@
+query,gold_ambiguous,notes
+Mercury,true,planet vs chemical element vs Roman god vs car brand -- different fields entirely
+Java,true,programming language vs Indonesian island vs coffee -- different fields entirely
+Python,true,programming language vs snake -- different fields entirely
+Mars,true,planet vs Roman god vs candy/confectionery brand -- different fields entirely
+Amazon,true,river/rainforest vs e-commerce company -- different fields entirely
+Football,true,American football vs association football (soccer) vs rugby football vs Australian rules vs Gaelic football -- same broad category, mutually exclusive games
+Hockey,true,ice hockey vs field hockey -- same broad category, mutually exclusive games
+Rugby,true,rugby union vs rugby league -- same broad category, mutually exclusive games
+Cricket,true,insect vs sport -- different fields entirely
+Pool,true,swimming pool vs billiards/pool (cue sport) -- different fields entirely
+Machine Learning,false,single coherent subject with many sub-topics that all connect
+Quantum Computing,false,single coherent subject with many sub-topics that all connect
+Blockchain,false,single coherent subject with many sub-topics that all connect
+Basketball,false,single sport -- positions/rules/history all belong to one subject
+Photosynthesis,false,single coherent biological process
+CRISPR Gene Editing,false,single coherent subject
+World War II,false,single coherent historical subject
+Tennis,false,single sport, no competing distinct games under the same name
+Chess,false,single coherent game
+Renaissance Art,false,single coherent subject

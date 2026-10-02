@@ -1,0 +1,15 @@
+concept_a,concept_b,gold_relation
+Qubit,Quantum Superposition,prerequisite_of
+Quantum Superposition,Quantum Entanglement,related_to
+Qubit,Quantum Gate,prerequisite_of
+Quantum Gate,Quantum Algorithm,prerequisite_of
+Quantum Algorithm,Shor's Algorithm,subtopic_of
+Quantum Algorithm,Grover's Algorithm,subtopic_of
+Shor's Algorithm,Grover's Algorithm,related_to
+Quantum Decoherence,Quantum Error Correction,enables
+Quantum Error Correction,Quantum Supremacy,prerequisite_of
+Quantum Decoherence,Quantum Supremacy,breaks
+Quantum Entanglement,Quantum Cryptography,enables
+Shor's Algorithm,Quantum Cryptography,related_to
+Dataflow Framework,Grover's Algorithm,no_relation
+Dataflow Framework,Quantum Cryptography,no_relation

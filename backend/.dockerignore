@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+.git
+rabbit_venv/
+.pytest_cache/
+eval/out/
