@@ -1,9 +1,9 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import cytoscape from 'cytoscape'
 // @ts-ignore – fcose has no bundled types
 import fcose from 'cytoscape-fcose'
 import { useAppStore } from '../store/appStore'
-import type { NodeData } from '../types'
+import type { EdgeData, NodeData } from '../types'
 
 cytoscape.use(fcose)
 
@@ -23,10 +23,30 @@ function nodeColor(node: NodeData, status: string, isSelected: boolean): string 
   return '#334155'
 }
 
+// The learning path's next step: the first node on it not yet marked learned.
+function nextStepId(learningPath: string[], progress: Record<string, string>): string | null {
+  return learningPath.find((id) => progress[id] !== 'learned') ?? null
+}
+
+// By default only the edges that tell a learner what to study first are drawn:
+// prerequisite_of, plus whatever attaches an expanded (depth >= 1) node to the graph
+// so it doesn't float. Every typed relation at once (labels and all) read as an
+// unlabelled tangle. If a graph has no prerequisite edges at all, everything is shown.
+function isEdgeShownByDefault(edge: EdgeData, depthById: Map<string, number>, hasPrereqs: boolean) {
+  if (!hasPrereqs || edge.relation_type === 'prerequisite_of') return true
+  return (depthById.get(edge.source_node_id) ?? 0) > 0 || (depthById.get(edge.target_node_id) ?? 0) > 0
+}
+
 export default function GraphCanvas() {
   const { graphData, selectedNodeId, progress, learningPath } = useAppStore()
   const containerRef = useRef<HTMLDivElement>(null)
   const cyRef = useRef<cytoscape.Core | null>(null)
+  const [showAllRelations, setShowAllRelations] = useState(false)
+
+  const hasPrereqs = !!graphData?.edges.some((e) => e.relation_type === 'prerequisite_of')
+  const depthById = new Map((graphData?.nodes ?? []).map((n) => [n.id, n.depth_level]))
+  const hasHiddenRelations = !!graphData && hasPrereqs &&
+    graphData.edges.some((e) => !isEdgeShownByDefault(e, depthById, hasPrereqs))
 
   // Initialise Cytoscape instance ONCE
   useEffect(() => {
@@ -52,6 +72,12 @@ export default function GraphCanvas() {
         useAppStore.getState().selectNode(null)
       }
     })
+
+    // Edge relation labels on hover only. Cytoscape has no :hover selector state --
+    // the old 'edge:hover' style rule wasn't a hover rule at all, and every edge
+    // label rendered permanently -- so hover is tracked with a class instead.
+    cy.on('mouseover', 'edge', (evt) => { evt.target.addClass('hovered') })
+    cy.on('mouseout', 'edge', (evt) => { evt.target.removeClass('hovered') })
 
     return () => {
       cy.destroy()
@@ -117,7 +143,7 @@ export default function GraphCanvas() {
     // which is what would actually apply the re-style below. Without this fix,
     // clicking any node would throw "cy.setStyle is not a function" and abort the
     // whole effect, so selection/progress highlighting never rendered at all.
-    cy.style(buildStyle(graphData.nodes, progress, selectedNodeId))
+    cy.style(buildStyle(graphData, progress, selectedNodeId, learningPath, showAllRelations))
 
     // Pan to selected node
     if (selectedNodeId) {
@@ -127,31 +153,48 @@ export default function GraphCanvas() {
                    { duration: 300 })
       }
     }
-  }, [selectedNodeId, progress, graphData])
-
-  // Highlight learning path edges
-  useEffect(() => {
-    const cy = cyRef.current
-    if (!cy) return
-    learningPath.forEach((nodeId, i) => {
-      const node = cy.getElementById(nodeId)
-      if (node.length) {
-        node.data('pathIndex', i + 1)
-      }
-    })
-  }, [learningPath])
+  }, [selectedNodeId, progress, graphData, learningPath, showAllRelations])
 
   return (
-    <div ref={containerRef} id="cy" aria-label="Knowledge graph canvas"
-         role="img" className="w-full h-full" />
+    <div className="relative w-full h-full">
+      <div ref={containerRef} id="cy" aria-label="Knowledge graph canvas"
+           role="img" className="w-full h-full" />
+
+      {/* Legend: how to read the graph as a learning route */}
+      <div className="absolute top-3 left-3 bg-[#1a1d27]/90 border border-[#2e3142] rounded-lg
+                      px-3 py-2 text-xs text-slate-400 space-y-1 pointer-events-auto">
+        <p><span className="text-slate-200 font-medium">1, 2, 3…</span> suggested learning order</p>
+        <p><span className="text-amber-400 font-medium">◎ ring</span> your next step</p>
+        {hasPrereqs && (
+          <p><span style={{ color: RELATION_COLORS.prerequisite_of }} className="font-medium">A → B</span>
+             {' '}learn A before B</p>
+        )}
+        {hasHiddenRelations && (
+          <label className="flex items-center gap-1.5 pt-1 cursor-pointer select-none">
+            <input type="checkbox" checked={showAllRelations}
+                   onChange={(e) => setShowAllRelations(e.target.checked)} />
+            Show all relation types
+          </label>
+        )}
+      </div>
+    </div>
   )
 }
 
 function buildStyle(
-  nodes: NodeData[],
+  graphData: { nodes: NodeData[]; edges: EdgeData[] },
   progress: Record<string, string>,
   selectedNodeId: string | null,
+  learningPath: string[],
+  showAllRelations: boolean,
 ): cytoscape.StylesheetStyle[] {
+  const nodes = graphData.nodes
+  const stepById = new Map(learningPath.map((id, i) => [id, i + 1]))
+  const nextId = nextStepId(learningPath, progress)
+  const depthById = new Map(nodes.map((n) => [n.id, n.depth_level]))
+  const hasPrereqs = graphData.edges.some((e) => e.relation_type === 'prerequisite_of')
+  const edgeById = new Map(graphData.edges.map((e) => [e.id, e]))
+
   return [
     {
       selector: 'node',
@@ -160,7 +203,12 @@ function buildStyle(
           const n = nodes.find((x) => x.id === ele.id())!
           return n ? nodeColor(n, progress[n.id] ?? 'not_started', ele.id() === selectedNodeId) : '#334155'
         },
-        'label': 'data(label)',
+        // Step number on the node itself, matching the "Start Here" panel.
+        'label': (ele: cytoscape.NodeSingular) => {
+          const step = stepById.get(ele.id())
+          const label = ele.data('label') as string
+          return step ? `${step}. ${label}` : label
+        },
         'color': '#e2e8f0',
         'font-size': '11px',
         'font-family': 'Inter, system-ui, sans-serif',
@@ -177,10 +225,12 @@ function buildStyle(
           const imp = (ele.data('importance_score') as number) ?? 1
           return Math.max(30, Math.min(60, 30 + imp * 10)) + 'px'
         },
+        // Selection wins; otherwise the next step on the path gets an amber ring so
+        // the canvas itself answers "where do I start / what's next?".
         'border-width': (ele: cytoscape.NodeSingular) =>
-          ele.id() === selectedNodeId ? 3 : 1.5,
+          ele.id() === selectedNodeId ? 3 : ele.id() === nextId ? 4 : 1.5,
         'border-color': (ele: cytoscape.NodeSingular) =>
-          ele.id() === selectedNodeId ? '#818cf8' : '#475569',
+          ele.id() === selectedNodeId ? '#818cf8' : ele.id() === nextId ? '#fbbf24' : '#475569',
         'transition-property': 'background-color, border-color, width, height',
         'transition-duration': '200ms',
       } as never,
@@ -208,12 +258,25 @@ function buildStyle(
         'line-style': (ele: cytoscape.EdgeSingular) =>
           ele.data('relation_type') === 'related_to' ? 'dashed' : 'solid',
         'opacity': 0.7,
+        'display': (ele: cytoscape.EdgeSingular) => {
+          const edge = edgeById.get(ele.id())
+          if (showAllRelations || !edge) return 'element'
+          return isEdgeShownByDefault(edge, depthById, hasPrereqs) ? 'element' : 'none'
+        },
       } as never,
     },
     {
-      selector: 'edge:hover',
-      style: { opacity: 1, 'label': 'data(relation_type)', 'font-size': '9px',
-               'color': '#94a3b8' } as never,
+      selector: 'edge.hovered',
+      style: {
+        opacity: 1,
+        'label': (ele: cytoscape.EdgeSingular) =>
+          (ele.data('relation_type') as string).replace(/_/g, ' '),
+        'font-size': '9px',
+        'color': '#94a3b8',
+        'text-background-color': '#0f1117',
+        'text-background-opacity': 0.8,
+        'text-background-padding': '2px',
+      } as never,
     },
   ]
 }

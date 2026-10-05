@@ -23,7 +23,10 @@ class WikipediaConnector(BaseConnector):
     source_type = "wikipedia"
 
     async def fetch(self, query: str, max_results: int = 5) -> list[RawDocument]:
-        cache_k = source_key("wikipedia", query)
+        # "v2": entries cached before the redirects fix below hold one-sentence
+        # summaries for any redirect title; a new key keeps them from being served
+        # for the rest of their 7-day TTL.
+        cache_k = source_key("wikipedia:v2", query)
         cached = await cache_get(cache_k)
         if cached:
             logger.debug("Wikipedia cache hit for '%s'", query)
@@ -66,10 +69,16 @@ class WikipediaConnector(BaseConnector):
                     # decommissioned"), which was silently degrading every
                     # article down to just its one-paragraph summary.
                     full_text = extract
+                    # "redirects": opensearch often returns a redirect title (e.g.
+                    # "Association football (soccer)"). The REST summary above
+                    # follows redirects on its own, but action=query does not: without
+                    # this it returns an empty extract for the redirect stub, and the
+                    # article silently degrades to its one-sentence summary.
                     content_resp = await client.get(WIKI_SEARCH_API, params={
                         "action": "query",
                         "prop": "extracts",
                         "explaintext": 1,
+                        "redirects": 1,
                         "titles": title,
                         "format": "json",
                     })

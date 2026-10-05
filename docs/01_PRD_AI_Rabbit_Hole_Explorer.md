@@ -1,13 +1,17 @@
 # Product Requirements Document (PRD)
 ## AI Internet Rabbit-Hole Explorer
 
-**Version:** 1.0
+**Version:** 1.1 (2026-10-02: goal hierarchy made explicit, see §1.0)
 **Course:** NLP
 **Document Type:** Product Requirements Document
 
 ---
 
 ## 1. Overview
+
+### 1.0 Goal Hierarchy
+1. **Primary — learn a topic without falling into a rabbit hole.** The learner should come away understanding the topic they asked about, in a sensible order, without getting lost in the endless chain of concepts-leading-to-concepts that open-internet learning produces. Every feature below is judged first by whether it keeps the learner bounded, ordered and oriented. The product name names the failure mode the product prevents.
+2. **Secondary — an NLP research result** (course deliverable): an ablation of relation-classification methods (keyword vs. embedding vs. LLM pairwise vs. LLM batched) and an ambiguity-detection eval. Relation quality feeds the primary goal directly, because `prerequisite_of` edges determine the learning path.
 
 ### 1.1 Problem Statement
 Learners exploring an unfamiliar domain (e.g., Artificial General Intelligence) face three core problems:
@@ -21,7 +25,7 @@ An AI-powered system that takes a single broad topic as input and:
 - Searches and aggregates content from multiple heterogeneous sources.
 - Builds an interactive, visual knowledge graph connecting these concepts.
 - Infers a beginner-friendly learning path (topological ordering of prerequisites).
-- Lets the learner "fall down the rabbit hole" by clicking any node to expand it further, with the graph growing dynamically.
+- Lets the learner take a controlled detour by clicking any node to expand it further, with the graph growing dynamically but capped in depth and size, kept visibly subordinate to the main path, and easy to return from.
 - Tracks what has been explored/completed and recommends the next node.
 
 ### 1.3 Target Users
@@ -33,7 +37,8 @@ An AI-powered system that takes a single broad topic as input and:
 
 ### 1.4 Goals & Non-Goals
 
-**Goals**
+**Goals** (all in service of the primary goal in §1.0)
+- Keep the learner on a bounded, ordered path through the topic, and make it easy to return to after any detour.
 - Turn one search term into a structured, explorable knowledge map within seconds.
 - Automatically infer prerequisite ordering between concepts.
 - Support incremental, click-driven graph expansion ("rabbit holes").

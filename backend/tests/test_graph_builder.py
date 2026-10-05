@@ -8,14 +8,21 @@ import uuid
 import pytest
 
 from app.db.models import Node, Edge
+from app.nlp import graph_builder
 from app.nlp.graph_builder import (
     deduplicate_concepts, apply_degree_centrality, _topological_sort,
-    _rank_by_textual_salience,
+    _rank_by_textual_salience, curriculum_edges, project_edges, one_edge_per_pair,
+    connected_component, relevant_indices, CURRICULUM_EDGE_CONFIDENCE, MIN_GRAPH_NODES,
 )
 
 
-def _node(importance: float = 1.0) -> Node:
-    return Node(id=uuid.uuid4(), importance_score=importance)
+def _node(importance: float = 1.0, label: str = "", depth: int = 0) -> Node:
+    return Node(id=uuid.uuid4(), importance_score=importance, label=label, depth_level=depth)
+
+
+def _rel(source: int, target: int, relation: str = "prerequisite_of", confidence: float = 0.8) -> dict:
+    return {"source_index": source, "target_index": target, "relation": relation,
+            "confidence": confidence}
 
 
 def _edge(source: Node, target: Node, relation_type: str = "related_to", confidence: float = 1.0) -> Edge:
@@ -178,3 +185,131 @@ def test_topological_sort_handles_a_cycle_without_dropping_nodes():
     # Kahn's algorithm can't order a cycle; both nodes must still appear exactly once.
     assert sorted(order) == sorted([a.id, b.id])
     assert len(order) == 2
+
+
+def test_topological_sort_breaks_ties_by_distance_from_root():
+    # Only one prerequisite edge constrains the order; the rest used to come out in
+    # arbitrary DB order. Unconstrained nodes must now follow distance from the root.
+    root, near, far, prereq_target = (_node(label=x) for x in ("root", "near", "far", "target"))
+    edges = [
+        _edge(root, near, "related_to"),
+        _edge(near, far, "related_to"),
+        _edge(root, prereq_target, "prerequisite_of"),
+    ]
+
+    order = _topological_sort([far, prereq_target, near, root], edges, root.id)
+
+    assert order[0] == root.id
+    assert order.index(near.id) < order.index(far.id)
+    assert order.index(root.id) < order.index(prereq_target.id)
+
+
+def test_topological_sort_puts_expanded_nodes_after_core_nodes():
+    core = _node(importance=0.1, label="core")
+    expanded = _node(importance=0.9, label="expanded", depth=1)
+
+    order = _topological_sort([expanded, core], [])
+
+    assert order == [core.id, expanded.id]
+
+
+# --------------------------------------------------------------------------- #
+# curriculum_edges / project_edges / one_edge_per_pair / connected_component
+# --------------------------------------------------------------------------- #
+
+def test_curriculum_edges_match_labels_case_insensitively_and_via_aliases():
+    concepts = [
+        {"label": "Ball Control", "aliases": [], "prerequisites": []},
+        {"label": "Passing", "aliases": ["Pass"], "prerequisites": ["ball  control"]},
+        {"label": "Offside Rule", "aliases": [],
+         "prerequisites": ["pass", "Unknown Thing", "Offside Rule", 42]},
+    ]
+
+    edges = curriculum_edges(concepts)
+
+    assert edges == [
+        {"source_index": 0, "target_index": 1, "relation": "prerequisite_of",
+         "confidence": CURRICULUM_EDGE_CONFIDENCE},
+        {"source_index": 1, "target_index": 2, "relation": "prerequisite_of",
+         "confidence": CURRICULUM_EDGE_CONFIDENCE},
+    ]  # unknown labels, self-references and non-strings ignored
+
+
+def test_curriculum_edges_empty_without_prerequisites():
+    assert curriculum_edges([{"label": "A"}, {"label": "B"}]) == []
+
+
+def test_project_edges_bridges_prerequisite_chain_through_a_dropped_concept():
+    # A -> B -> C, B dropped: A must still precede C.
+    edges = [_rel(0, 1), _rel(1, 2)]
+
+    projected = project_edges(edges, kept=[0, 2])
+
+    assert [(e["source_index"], e["target_index"]) for e in projected] == [(0, 1)]
+
+
+def test_project_edges_drops_non_prerequisite_edges_with_their_endpoint():
+    edges = [_rel(0, 1, "related_to"), _rel(1, 2, "related_to")]
+    assert project_edges(edges, kept=[0, 2]) == []
+
+
+def test_one_edge_per_pair_keeps_strongest_and_prefers_prerequisite_on_tie():
+    edges = [
+        _rel(0, 1, "prerequisite_of", 0.5),
+        _rel(1, 0, "subtopic_of", 0.5),     # same pair, tie -> prerequisite_of wins
+        _rel(2, 3, "related_to", 0.6),
+        _rel(3, 2, "enables", 0.9),         # same pair, higher confidence wins
+    ]
+
+    kept = {(e["source_index"], e["target_index"], e["relation"]) for e in one_edge_per_pair(edges)}
+
+    assert kept == {(0, 1, "prerequisite_of"), (3, 2, "enables")}
+
+
+def test_connected_component_is_undirected():
+    edges = [_rel(1, 0), _rel(1, 2), _rel(3, 4)]
+    assert connected_component(0, 5, edges) == {0, 1, 2}
+
+
+# --------------------------------------------------------------------------- #
+# relevant_indices (off-topic filter)
+# --------------------------------------------------------------------------- #
+
+def _fake_scores(monkeypatch, scores: dict[str, float]):
+    """Make encode()/cosine_similarity() return a fixed similarity per text."""
+    monkeypatch.setattr(graph_builder, "encode_one", lambda text: "TOPIC")
+    monkeypatch.setattr(graph_builder, "encode", lambda texts: list(texts))
+    monkeypatch.setattr(graph_builder, "cosine_similarity", lambda a, b: scores[b])
+
+
+def test_relevant_indices_drops_clear_outliers(monkeypatch):
+    concepts = [{"label": f"C{i}", "description": "d"} for i in range(7)]
+    scores = {f"C{i}: d": 0.5 for i in range(7)}
+    scores["C3: d"] = 0.05
+    _fake_scores(monkeypatch, scores)
+
+    assert relevant_indices(concepts, "topic", threshold=0.2) == [0, 1, 2, 4, 5, 6]
+
+
+def test_relevant_indices_never_drops_below_minimum(monkeypatch):
+    concepts = [{"label": f"C{i}", "description": "d"} for i in range(MIN_GRAPH_NODES + 2)]
+    scores = {f"C{i}: d": 0.01 * i for i in range(MIN_GRAPH_NODES + 2)}  # all below threshold
+    _fake_scores(monkeypatch, scores)
+
+    kept = relevant_indices(concepts, "topic", threshold=0.9)
+
+    assert len(kept) == MIN_GRAPH_NODES
+    assert kept == sorted(kept)  # order preserved
+    assert 0 not in kept and 1 not in kept  # the two least similar went
+
+
+def test_relevant_indices_uses_label_only_for_spacy_fallback(monkeypatch):
+    # spaCy concepts share a templated description that would make every one look
+    # relevant, so only the label is compared.
+    concepts = [{"label": f"C{i}", "description": "A key concept related to X.",
+                 "_source": "spacy_fallback"} for i in range(6)]
+    scores = {f"C{i}": 0.5 for i in range(6)}
+    scores["C0"] = 0.0
+    _fake_scores(monkeypatch, scores)
+
+    assert relevant_indices(concepts, "X", threshold=0.2) == [1, 2, 3, 4, 5]

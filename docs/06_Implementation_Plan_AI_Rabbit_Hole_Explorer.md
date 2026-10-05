@@ -2,6 +2,7 @@
 ## AI Internet Rabbit-Hole Explorer
 
 **Context:** NLP course project — combines a working software system with material suitable for a research write-up (the relation-extraction pipeline + ablation study is the research contribution).
+**Goal priority (2026-10-02):** the primary goal is the product's: let a learner learn a topic without falling into a rabbit hole (bounded map, ordered path, controlled detours). The research write-up is secondary. See `01_PRD` §1.0.
 
 ---
 

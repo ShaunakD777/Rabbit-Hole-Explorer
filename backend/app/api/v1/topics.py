@@ -114,9 +114,9 @@ async def get_graph(topic_id: UUID, db: AsyncSession = Depends(get_db)):
         select(Edge).where(Edge.graph_id == graph.id)
     )).scalars().all()
 
-    # Build learning path (topological sort of prereq edges)
+    # Build learning path (topological sort of prereq edges, tie-broken from the root)
     from app.nlp.graph_builder import _topological_sort
-    learning_path = _topological_sort(list(nodes), list(edges))
+    learning_path = _topological_sort(list(nodes), list(edges), graph.root_node_id)
 
     return GraphOut(
         graph_id=graph.id,

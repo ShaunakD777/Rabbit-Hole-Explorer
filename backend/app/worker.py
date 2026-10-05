@@ -1,8 +1,18 @@
 """Celery app definition."""
 from celery import Celery
+from celery.signals import setup_logging
+
 from app.config import get_settings
+from app.logging_utils import configure_logging
 
 settings = get_settings()
+
+
+@setup_logging.connect
+def _configure_worker_logging(**_kwargs):
+    # Connecting a receiver stops Celery from installing its own root-logger
+    # config, so worker output uses the same format (with per-run ids) as the API.
+    configure_logging()
 
 celery_app = Celery(
     "rabbit_hole",

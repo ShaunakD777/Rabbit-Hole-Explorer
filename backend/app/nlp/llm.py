@@ -39,6 +39,7 @@ import httpx
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config import get_settings
+from app.logging_utils import last_llm_provider, preview, record_llm_call
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -203,6 +204,14 @@ def _keys_for(provider: _Provider) -> list[str]:
 
 
 async def _acquire_key(provider: _Provider, keys: list[str], est_tokens: int) -> str:
+    """Thin wrapper over _acquire_key_indexed() for callers that only need the key."""
+    key, _ = await _acquire_key_indexed(provider, keys, est_tokens)
+    return key
+
+
+async def _acquire_key_indexed(
+    provider: _Provider, keys: list[str], est_tokens: int
+) -> tuple[str, int]:
     """
     Pick whichever of this provider's keys has capacity available right now,
     instead of funneling every call through a single shared bucket -- that's what
@@ -227,12 +236,17 @@ async def _acquire_key(provider: _Provider, keys: list[str], est_tokens: int) ->
     for i in order:
         if buckets[i].try_acquire(est_tokens):
             _touch_last_used(bucket_keys[i])
-            return keys[i]
+            return keys[i], i
 
     lru_index = order[0]
+    t0 = time.monotonic()
+    logger.info("Rate limit: all %d key(s) for '%s' at capacity, waiting (est %d tokens)",
+                len(keys), provider.name, est_tokens)
     await buckets[lru_index].acquire(est_tokens)
+    logger.info("Rate limit: waited %.1fs for '%s' key #%d", time.monotonic() - t0,
+                provider.name, lru_index)
     _touch_last_used(bucket_keys[lru_index])
-    return keys[lru_index]
+    return keys[lru_index], lru_index
 
 
 # --------------------------------------------------------------------------- #
@@ -242,10 +256,13 @@ def _configured_chain() -> list[str]:
     """Provider names from settings.llm_provider_chain that have at least one API key set."""
     names = [n.strip().lower() for n in settings.llm_provider_chain.split(",") if n.strip()]
     chain: list[str] = []
+    skipped: list[str] = []
     for name in names:
         if name == "anthropic":
             if settings.anthropic_api_key:
                 chain.append(name)
+            else:
+                skipped.append(name)
             continue
         provider = _OPENAI_COMPAT_PROVIDERS.get(name)
         if provider is None:
@@ -253,6 +270,9 @@ def _configured_chain() -> list[str]:
             continue
         if _keys_for(provider):
             chain.append(name)
+        else:
+            skipped.append(name)
+    logger.debug("LLM chain resolved: active=%s skipped(no key)=%s", chain, skipped)
     return chain
 
 
@@ -262,8 +282,48 @@ def _is_retryable(exc: BaseException) -> bool:
     return isinstance(exc, (httpx.TransportError, httpx.TimeoutException))
 
 
+def _describe_exc(exc: BaseException) -> str:
+    """
+    One-line description of a provider failure. For HTTP errors this includes the
+    status code and the start of the response body -- the body is where providers
+    say *why* (e.g. "model_not_found" for a retired model name), which `str(exc)`
+    alone omits.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        body = preview(exc.response.text or "", head=200, tail=0)
+        return f"HTTP {exc.response.status_code}: {body}"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _log_retry(retry_state) -> None:
+    exc = retry_state.outcome.exception()
+    logger.warning("LLM request retrying (attempt %d/3 failed, next in %.1fs): %s",
+                   retry_state.attempt_number, retry_state.next_action.sleep, _describe_exc(exc))
+
+
+def _log_llm_ok(provider: str, model: str, key_label: str, seconds: float, prompt: str,
+                max_tokens: int, text: str, finish_reason: str | None,
+                usage: dict | None = None) -> None:
+    usage_txt = ""
+    if usage:
+        usage_txt = (f" tokens(prompt={usage.get('prompt_tokens')}, "
+                     f"completion={usage.get('completion_tokens')})")
+    logger.info("LLM OK provider=%s model=%s key=%s latency=%.2fs prompt~%dtok max_tokens=%d "
+                "out=%d chars finish=%s%s", provider, model, key_label, seconds,
+                _estimate_tokens(prompt), max_tokens, len(text), finish_reason, usage_txt)
+    # A cut-off answer is the exact failure that used to make reasoning models
+    # truncate JSON mid-string and silently drop the run to spaCy.
+    if finish_reason == "length":
+        logger.warning("LLM TRUNCATED provider=%s model=%s: hit max_tokens=%d after %d chars -- "
+                       "JSON/text will likely be cut off (reasoning tokens count against "
+                       "max_tokens)", provider, model, max_tokens, len(text))
+    record_llm_call(provider, True, seconds, model=model, finish=finish_reason)
+    last_llm_provider.set(provider)
+
+
 async def _post_chat_completion(
-    client: httpx.AsyncClient, provider: _Provider, api_key: str, prompt: str, max_tokens: int
+    client: httpx.AsyncClient, provider: _Provider, api_key: str, prompt: str, max_tokens: int,
+    key_label: str = "?",
 ) -> str:
     model = getattr(settings, provider.model_setting, "") or provider.default_model
     url = f"{provider.base_url}/chat/completions"
@@ -275,17 +335,26 @@ async def _post_chat_completion(
     }
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
+    t0 = time.monotonic()
+    logger.debug("LLM request provider=%s model=%s key=%s prompt~%dtok max_tokens=%d",
+                 provider.name, model, key_label, _estimate_tokens(prompt), max_tokens)
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
         retry=retry_if_exception(_is_retryable),
+        before_sleep=_log_retry,
         reraise=True,
     ):
         with attempt:
             resp = await client.post(url, json=body, headers=headers, timeout=30.0)
             resp.raise_for_status()
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            content = choice["message"]["content"]
+            _log_llm_ok(provider.name, model, key_label, time.monotonic() - t0, prompt,
+                        max_tokens, content or "", choice.get("finish_reason"),
+                        data.get("usage"))
+            return content
     raise AssertionError("unreachable")  # AsyncRetrying always returns or raises
 
 
@@ -313,31 +382,60 @@ async def complete_text(prompt: str, *, max_tokens: int = 1024) -> str:
     """Return raw text from the first provider in the chain that succeeds."""
     chain = _configured_chain()
     if not chain:
+        logger.warning("LLM chain is empty: no provider in LLM_PROVIDER_CHAIN='%s' has an API key",
+                       settings.llm_provider_chain)
         raise AllProvidersFailed("No LLM provider is configured (all API keys empty).")
 
+    logger.debug("LLM call: chain=%s prompt~%dtok max_tokens=%d", chain,
+                 _estimate_tokens(prompt), max_tokens)
     errors: list[str] = []
     async with httpx.AsyncClient() as client:
-        for name in chain:
+        for pos, name in enumerate(chain):
+            t0 = time.monotonic()
             try:
                 if name == "anthropic":
                     text = await _call_anthropic(prompt, max_tokens)
+                    _log_llm_ok(name, settings.anthropic_model or "claude-3-5-haiku-20241022",
+                                "-", time.monotonic() - t0, prompt, max_tokens, text, None)
                 else:
                     provider = _OPENAI_COMPAT_PROVIDERS[name]
                     keys = _keys_for(provider)
-                    api_key = await _acquire_key(provider, keys, _estimate_tokens(prompt) + max_tokens)
-                    text = await _post_chat_completion(client, provider, api_key, prompt, max_tokens)
+                    api_key, key_idx = await _acquire_key_indexed(
+                        provider, keys, _estimate_tokens(prompt) + max_tokens)
+                    text = await _post_chat_completion(
+                        client, provider, api_key, prompt, max_tokens,
+                        key_label=f"#{key_idx + 1}/{len(keys)}")
                 return text.strip()
             except Exception as exc:
-                logger.warning("LLM provider '%s' failed: %s", name, exc)
+                seconds = time.monotonic() - t0
+                nxt = chain[pos + 1] if pos + 1 < len(chain) else None
+                logger.warning("LLM FAIL provider=%s after %.2fs: %s -> %s", name, seconds,
+                               _describe_exc(exc),
+                               f"falling through to '{nxt}'" if nxt else "no providers left")
+                record_llm_call(name, False, seconds, error=type(exc).__name__)
                 errors.append(f"{name}: {exc}")
 
     raise AllProvidersFailed("; ".join(errors))
 
 
+def _parse_json_response(raw: str, source: str) -> Any:
+    """
+    Parse a (fence-stripped) LLM answer as JSON. A parse failure is logged with
+    the head and tail of the raw text -- the tail shows immediately whether the
+    answer was cut off mid-string (truncation) or is simply not JSON.
+    """
+    try:
+        return json.loads(strip_json_fences(raw))
+    except json.JSONDecodeError as exc:
+        logger.warning("LLM JSON PARSE FAIL source=%s: %s | raw (%d chars): %s", source, exc,
+                       len(raw), preview(raw))
+        raise
+
+
 async def complete_json(prompt: str, *, max_tokens: int = 1024) -> Any:
     """Like complete_text, but parses the (fence-stripped) result as JSON."""
     raw = await complete_text(prompt, max_tokens=max_tokens)
-    return json.loads(strip_json_fences(raw))
+    return _parse_json_response(raw, last_llm_provider.get() or "chain")
 
 
 async def complete_text_from(provider_name: str, prompt: str, *, max_tokens: int = 1024) -> str:
@@ -350,27 +448,41 @@ async def complete_text_from(provider_name: str, prompt: str, *, max_tokens: int
     return the first success and never reach the others.
     """
     provider_name = provider_name.lower()
-    if provider_name == "anthropic":
-        if not settings.anthropic_api_key:
-            raise AllProvidersFailed("anthropic has no configured key")
-        return (await _call_anthropic(prompt, max_tokens)).strip()
+    t0 = time.monotonic()
+    try:
+        if provider_name == "anthropic":
+            if not settings.anthropic_api_key:
+                raise AllProvidersFailed("anthropic has no configured key")
+            text = await _call_anthropic(prompt, max_tokens)
+            _log_llm_ok("anthropic", settings.anthropic_model or "claude-3-5-haiku-20241022",
+                        "-", time.monotonic() - t0, prompt, max_tokens, text, None)
+            return text.strip()
 
-    provider = _OPENAI_COMPAT_PROVIDERS.get(provider_name)
-    if provider is None:
-        raise AllProvidersFailed(f"unknown provider '{provider_name}'")
-    keys = _keys_for(provider)
-    if not keys:
-        raise AllProvidersFailed(f"provider '{provider_name}' has no configured key")
+        provider = _OPENAI_COMPAT_PROVIDERS.get(provider_name)
+        if provider is None:
+            raise AllProvidersFailed(f"unknown provider '{provider_name}'")
+        keys = _keys_for(provider)
+        if not keys:
+            raise AllProvidersFailed(f"provider '{provider_name}' has no configured key")
 
-    async with httpx.AsyncClient() as client:
-        api_key = await _acquire_key(provider, keys, _estimate_tokens(prompt) + max_tokens)
-        return (await _post_chat_completion(client, provider, api_key, prompt, max_tokens)).strip()
+        async with httpx.AsyncClient() as client:
+            api_key, key_idx = await _acquire_key_indexed(
+                provider, keys, _estimate_tokens(prompt) + max_tokens)
+            return (await _post_chat_completion(
+                client, provider, api_key, prompt, max_tokens,
+                key_label=f"#{key_idx + 1}/{len(keys)}")).strip()
+    except Exception as exc:
+        seconds = time.monotonic() - t0
+        logger.warning("LLM FAIL provider=%s (direct call) after %.2fs: %s", provider_name,
+                       seconds, _describe_exc(exc))
+        record_llm_call(provider_name, False, seconds, error=type(exc).__name__)
+        raise
 
 
 async def complete_json_from(provider_name: str, prompt: str, *, max_tokens: int = 1024) -> Any:
     """Like complete_text_from, but parses the (fence-stripped) result as JSON."""
     raw = await complete_text_from(provider_name, prompt, max_tokens=max_tokens)
-    return json.loads(strip_json_fences(raw))
+    return _parse_json_response(raw, provider_name)
 
 
 def configured_providers() -> list[str]:

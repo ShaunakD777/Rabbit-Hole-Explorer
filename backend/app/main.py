@@ -6,16 +6,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
+from app.logging_utils import configure_logging
 from app.db.session import init_db
 from app.api.v1 import router as api_router
 from app.api.ws import router as ws_router, run_subscriber as run_ws_subscriber
 
 settings = get_settings()
 
-logging.basicConfig(
-    level=getattr(logging, settings.log_level.upper(), logging.INFO),
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 

@@ -11,6 +11,7 @@ Task flow for a new topic:
 import asyncio
 import logging
 
+from app.logging_utils import finish_trace, start_trace, step
 from app.worker import celery_app
 
 logger = logging.getLogger(__name__)
@@ -64,63 +65,82 @@ def build_topic_graph(self, topic_id: str, prior_knowledge: list[str] | None = N
         from app.nlp.graph_builder import build_graph
         from app.api.ws import broadcast
 
-        async with AsyncSessionLocal() as db:
-            # Load topic
-            stmt = select(Topic).where(Topic.id == topic_id)
-            topic = (await db.execute(stmt)).scalars().first()
-            if not topic:
-                logger.error("Topic %s not found", topic_id)
-                return
+        start_trace("topic", topic_id)
+        status = "failed"
+        try:
+            async with AsyncSessionLocal() as db:
+                # Load topic
+                stmt = select(Topic).where(Topic.id == topic_id)
+                topic = (await db.execute(stmt)).scalars().first()
+                if not topic:
+                    logger.error("Topic %s not found", topic_id)
+                    status = "not_found"
+                    return
 
-            try:
-                # Notify frontend: step 1
-                await broadcast(topic_id, {"event": "progress", "step": 1,
-                                           "message": "Searching sources..."})
+                logger.info("Building topic '%s' (attempt %d/%d, prior_knowledge=%s)",
+                            topic.raw_query, self.request.retries + 1, self.max_retries + 1,
+                            prior_knowledge or [])
 
-                # Step 1: Fetch sources
-                raw_docs = await fetch_all_sources(topic.raw_query, max_per_source=5)
-                source_docs = await persist_documents(raw_docs, db)
+                try:
+                    # Notify frontend: step 1
+                    await broadcast(topic_id, {"event": "progress", "step": 1,
+                                               "message": "Searching sources..."})
 
-                # Notify frontend: step 2
-                await broadcast(topic_id, {"event": "progress", "step": 2,
-                                           "message": "Extracting concepts..."})
+                    # Step 1: Fetch sources
+                    with step("fetch_sources", query=repr(topic.raw_query)) as info:
+                        raw_docs = await fetch_all_sources(topic.raw_query, max_per_source=5)
+                        source_docs = await persist_documents(raw_docs, db)
+                        info["docs"] = len(source_docs)
 
-                # Step 2: Extract concepts
-                combined_text = build_combined_context(source_docs)
-                concepts = await extract_concepts(
-                    topic.raw_query, combined_text, prior_knowledge=prior_knowledge
-                )
+                    # Notify frontend: step 2
+                    await broadcast(topic_id, {"event": "progress", "step": 2,
+                                               "message": "Extracting concepts..."})
 
-                # Notify frontend: step 3
-                await broadcast(topic_id, {"event": "progress", "step": 3,
-                                           "message": "Building knowledge graph..."})
+                    # Step 2: Extract concepts
+                    with step("extract_concepts") as info:
+                        combined_text = build_combined_context(source_docs)
+                        concepts = await extract_concepts(
+                            topic.raw_query, combined_text, prior_knowledge=prior_knowledge
+                        )
+                        info["concepts"] = len(concepts)
 
-                # Step 3: Build graph
-                graph, learning_path = await build_graph(
-                    topic, concepts, source_docs, db
-                )
+                    # Notify frontend: step 3
+                    await broadcast(topic_id, {"event": "progress", "step": 3,
+                                               "message": "Building knowledge graph..."})
 
-                topic.status = "ready"
-                await db.commit()
+                    # Step 3: Build graph
+                    with step("build_graph", concepts_in=len(concepts)) as info:
+                        graph, learning_path = await build_graph(
+                            topic, concepts, source_docs, db
+                        )
+                        info["path_len"] = len(learning_path)
 
-                # Notify frontend: done
-                await broadcast(topic_id, {
-                    "event": "graph_ready",
-                    "topic_id": topic_id,
-                    "graph_id": str(graph.id),
-                    "learning_path": learning_path,
-                })
-                logger.info("Graph built for topic %s (graph %s)", topic_id, graph.id)
+                    topic.status = "ready"
+                    await db.commit()
+                    status = "ready"
 
-                # Kick off trend detection in background
-                detect_trends.delay(topic_id)
+                    # Notify frontend: done
+                    await broadcast(topic_id, {
+                        "event": "graph_ready",
+                        "topic_id": topic_id,
+                        "graph_id": str(graph.id),
+                        "learning_path": learning_path,
+                    })
+                    logger.info("Graph built for topic %s (graph %s)", topic_id, graph.id)
 
-            except Exception as exc:
-                logger.exception("Pipeline failed for topic %s: %s", topic_id, exc)
-                topic.status = "failed"
-                await db.commit()
-                await broadcast(topic_id, {"event": "error", "message": str(exc)})
-                raise self.retry(exc=exc, countdown=10)
+                    # Kick off trend detection in background
+                    detect_trends.delay(topic_id)
+
+                except Exception as exc:
+                    logger.exception("Pipeline failed for topic %s: %s", topic_id, exc)
+                    topic.status = "failed"
+                    await db.commit()
+                    await broadcast(topic_id, {"event": "error", "message": str(exc)})
+                    raise self.retry(exc=exc, countdown=10)
+        finally:
+            # Runs on every exit path (success, failure + retry, not-found), so each
+            # attempt always ends with exactly one SUMMARY line.
+            finish_trace(status)
 
     _run(_run_pipeline())
 
@@ -199,11 +219,19 @@ def expand_node(self, node_id: str, graph_id: str):
                 await _broadcast_both({"event": "expanding", "node_id": node_id,
                                        "message": f"Expanding '{node.label}'..."})
 
-                raw_docs = await fetch_all_sources(node.label, max_per_source=3)
-                source_docs = await persist_documents(raw_docs, db)
+                logger.info("Expanding node '%s' (depth %d/%d, graph has %d nodes, budget %d)",
+                            node.label, current_depth, settings.max_expansion_depth,
+                            len(existing_nodes), remaining_budget)
 
-                combined_text = build_combined_context(source_docs, per_doc_chars=400, max_total_chars=2500)
-                new_concepts = await extract_concepts(node.label, combined_text)
+                with step("fetch_sources", query=repr(node.label)) as info:
+                    raw_docs = await fetch_all_sources(node.label, max_per_source=3)
+                    source_docs = await persist_documents(raw_docs, db)
+                    info["docs"] = len(source_docs)
+
+                with step("extract_concepts") as info:
+                    combined_text = build_combined_context(source_docs, per_doc_chars=400, max_total_chars=2500)
+                    new_concepts = await extract_concepts(node.label, combined_text)
+                    info["concepts"] = len(new_concepts)
 
                 # Filter out concepts that are near-duplicates of any existing node,
                 # by embedding cosine similarity -- exact lowercase label matching
@@ -225,8 +253,14 @@ def expand_node(self, node_id: str, graph_id: str):
                     if not is_dup:
                         filtered.append(c)
                         filtered_vecs.append(vec)
+                    else:
+                        logger.info("Expansion dedup: '%s' duplicates an existing node, skipped",
+                                    c["label"])
                     if len(filtered) >= per_call_cap:
                         break
+                logger.info("Expansion of '%s': %d candidate(s) -> %d new node(s) (cap %d): %s",
+                            node.label, len(new_concepts), len(filtered), per_call_cap,
+                            [c["label"] for c in filtered])
 
                 if filtered:
                     # Add new nodes at depth = parent depth + 1
@@ -301,7 +335,16 @@ def expand_node(self, node_id: str, graph_id: str):
                 logger.exception("Expansion failed for node %s: %s", node_id, exc)
                 raise self.retry(exc=exc, countdown=10)
 
-    _run(_run_expansion())
+    async def _traced():
+        start_trace("expand", node_id)
+        status = "failed"
+        try:
+            await _run_expansion()
+            status = "done"
+        finally:
+            finish_trace(status)
+
+    _run(_traced())
 
 
 @celery_app.task(bind=True, name="tasks.detect_trends", max_retries=1)
@@ -320,4 +363,14 @@ def detect_trends(self, topic_id: str):
                 logger.exception("Trend detection failed for topic %s: %s", topic_id, exc)
                 raise self.retry(exc=exc, countdown=30)
 
-    _run(_run_trends())
+    async def _traced():
+        start_trace("trends", topic_id)
+        status = "failed"
+        try:
+            with step("detect_trends"):
+                await _run_trends()
+            status = "done"
+        finally:
+            finish_trace(status)
+
+    _run(_traced())

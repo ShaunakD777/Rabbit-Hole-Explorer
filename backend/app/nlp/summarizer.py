@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.cache import cache_get, cache_set, llm_summary_key
 from app.db.models import Node, Summary, SourceChunk, NodeSource
 from app.nlp.llm import complete_text, AllProvidersFailed
+from app.logging_utils import degrade, last_llm_provider
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -53,12 +54,16 @@ async def get_or_generate_summary(
     stmt = select(Summary).where(Summary.node_id == node.id, Summary.depth == depth)
     existing = (await db.execute(stmt)).scalars().first()
     if existing:
+        logger.info("Summary '%s'/%s: served from DB (%d chars)", node.label, depth,
+                    len(existing.content))
         return existing
 
     # Check Redis
     cache_k = llm_summary_key(str(node.id), depth)
     cached = await cache_get(cache_k)
     if cached:
+        logger.info("Summary '%s'/%s: served from Redis cache (%d chars)", node.label, depth,
+                    len(cached["content"]))
         s = Summary(node_id=node.id, depth=depth,
                     content=cached["content"], citations=cached["citations"])
         db.add(s)
@@ -103,8 +108,14 @@ async def _generate_summary(
         rows = result.fetchall()
     else:
         # Fallback: grab any chunks from linked source docs
+        logger.warning("Summary '%s'/%s: node has no embedding, cannot retrieve passages",
+                       node.label, depth)
         rows = []
 
+    logger.info("Summary '%s'/%s: retrieved %d/%d passage(s)%s", node.label, depth, len(rows),
+                cfg["max_chunks"],
+                f", similarity range {rows[-1].similarity:.3f}-{rows[0].similarity:.3f}"
+                if rows else "")
     passages = []
     citations: list[dict] = []
     for i, row in enumerate(rows, 1):
@@ -113,6 +124,8 @@ async def _generate_summary(
 
     if not passages:
         # Last resort: use node description
+        degrade("summary", f"no passages for '{node.label}' ({depth}); returning the node "
+                           f"description instead of a generated summary")
         content = node.description_short or f"No content available for {node.label}."
         return content, []
 
@@ -124,9 +137,12 @@ async def _generate_summary(
     )
     try:
         content = await complete_text(prompt, max_tokens=cfg["max_words"] * 2)
-        logger.info("Generated %s summary for node '%s' (%d chars)", depth, node.label, len(content))
+        logger.info("Generated %s summary for node '%s' via provider=%s (%d chars)", depth,
+                    node.label, last_llm_provider.get(), len(content))
         return content, citations
     except AllProvidersFailed as exc:
-        logger.warning("No LLM provider available for summary, using raw passages: %s", exc)
+        degrade("summary", f"no LLM provider for '{node.label}' ({depth}); returning raw "
+                           f"passages instead of a summary ({exc}). This is cached for "
+                           f"{settings.ttl_llm_cache}s")
         content = f"**{node.label}**\n\n" + "\n\n".join(passages[:3])
         return content, citations

@@ -5,6 +5,13 @@ course project (Semester VII). Enter any topic and get an interactive, expandabl
 knowledge graph with learning paths, multi-depth summaries, YouTube extraction,
 trend detection, and progress tracking.
 
+**Goal:** let you learn a topic *without* falling into a rabbit hole. You get a
+bounded map of the topic, an ordered "Start Here" path through it, a clear next
+step and visible progress. Expanding a node lets you take a detour, but detours are
+capped so you can always get back to the main path. The name describes the problem
+the app solves, not what it encourages. A secondary goal is the NLP research
+behind it: an ablation of relation-classification methods (see `backend/eval/`).
+
 **Stack:** React + TypeScript (Vite, Cytoscape) · FastAPI · Celery · PostgreSQL + pgvector · Redis
 
 ---
@@ -12,7 +19,7 @@ trend detection, and progress tracking.
 ## Features
 
 - **Topic → knowledge graph:** fetches sources (Wikipedia, arXiv / Semantic Scholar,
-  YouTube, Reddit, web search), extracts 6–10 key concepts, and classifies the
+  YouTube, Reddit, web search), extracts up to 12 key concepts, and classifies the
   relations between them (`prerequisite_of`, `subtopic_of`, `enables`, `related_to`, `breaks`).
 - **Ambiguity check:** queries with several unrelated meanings ("Mercury", "Java")
   ask you to pick a sense before the graph is built.

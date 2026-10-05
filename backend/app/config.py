@@ -30,10 +30,14 @@ class Settings(BaseSettings):
     llm_provider_chain: str = "gemini,groq"
     anthropic_model: str = ""
 
-    # "batched": one LLM call classifies all relations for a graph build (default).
+    # "curriculum" (default): no relation call -- prerequisite_of edges come from the
+    #   prerequisites concept extraction already returns (one LLM call per build total).
+    #   Falls back to "batched" when extraction produced no prerequisites (spaCy
+    #   fallback, or an older cached result).
+    # "batched": one extra LLM call classifies all typed relations for a graph build.
     # "pairwise": the legacy O(n^2) one-call-per-pair behaviour, kept only for the
-    # ablation study (see backend/eval/).
-    relation_mode: str = "batched"
+    #   ablation study (see backend/eval/).
+    relation_mode: str = "curriculum"
 
     # Number of distinct providers to consult concurrently for relation classification
     # (see extraction.py::classify_relations_ensemble). >1 requires that many providers
@@ -59,12 +63,20 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-production"
     environment: str = "development"
     log_level: str = "INFO"
+    log_file: str = ""   # optional rotating log file path (stdout is always on); see logging_utils.py
 
     # NLP settings
     embedding_model: str = "all-MiniLM-L6-v2"
     embedding_dim: int = 384
     node_dedup_threshold: float = 0.92   # cosine similarity above which nodes are merged
     relation_confidence_threshold: float = 0.5
+    # Concepts whose "label: description" embedding is less similar than this to the
+    # topic query are dropped before the graph is built (never below
+    # graph_builder.MIN_GRAPH_NODES). Deliberately conservative: calibrated on stored
+    # graphs (2026-10-03), on-topic concepts scored as low as ~0.34 while clear
+    # tangents scored ~0.08-0.16, and the two ranges overlap above ~0.3, so this
+    # only removes clear outliers. It is a safety net, not the main relevance fix.
+    concept_relevance_threshold: float = 0.20
     max_expansion_depth: int = 3
     initial_graph_node_cap: int = 12
     # Total nodes a single graph may ever reach via expand_node -- max_expansion_depth

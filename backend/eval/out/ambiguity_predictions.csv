@@ -1,0 +1,21 @@
+query,gold_ambiguous,predicted_ambiguous,correct,predicted_senses,notes
+Mercury,True,True,True,Planet; Chemical element; Roman god; Automobile brand,planet vs chemical element vs Roman god vs car brand -- different fields entirely
+Java,True,True,True,Java (programming language); Java (island); Java (coffee),programming language vs Indonesian island vs coffee -- different fields entirely
+Python,True,True,True,Python (programming language); Python (snake); Python (mythology); Python (brand),programming language vs snake -- different fields entirely
+Mars,True,True,True,Planet Mars; Mars (Roman deity); Mars (candy),planet vs Roman god vs candy/confectionery brand -- different fields entirely
+Amazon,True,True,True,Amazon (company); Amazon River; Amazon rainforest; Amazon (mythology),river/rainforest vs e-commerce company -- different fields entirely
+Football,True,True,True,American Football; Association Football (Soccer); Rugby Football; Australian Rules Football,American football vs association football (soccer) vs rugby football vs Australian rules vs Gaelic football -- same broad category
+Hockey,True,True,True,Ice Hockey; Field Hockey; Hockey (general),ice hockey vs field hockey -- same broad category
+Rugby,True,False,False,,rugby union vs rugby league -- same broad category
+Cricket,True,False,False,,insect vs sport -- different fields entirely
+Pool,True,True,True,Pool (Billiards); Swimming Pool; Financial Pool,swimming pool vs billiards/pool (cue sport) -- different fields entirely
+Machine Learning,False,False,True,,single coherent subject with many sub-topics that all connect
+Quantum Computing,False,False,True,,single coherent subject with many sub-topics that all connect
+Blockchain,False,False,True,,single coherent subject with many sub-topics that all connect
+Basketball,False,False,True,,single sport -- positions/rules/history all belong to one subject
+Photosynthesis,False,False,True,,single coherent biological process
+CRISPR Gene Editing,False,False,True,,single coherent subject
+World War II,False,False,True,,single coherent historical subject
+Tennis,False,False,True,,single sport
+Chess,False,False,True,,single coherent game
+Renaissance Art,False,False,True,,single coherent subject
